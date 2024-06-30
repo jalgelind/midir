@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 use crate::errors::*;
 use crate::Ignore;
 
-use windows::core::HSTRING;
+use windows::core::{GUID, HSTRING, Interface, h};
 
 use windows::{
-    Devices::Enumeration::DeviceInformation,
+    Devices::Enumeration::{DeviceInformation, DeviceInformationKind},
     Devices::Midi::*,
-    Foundation::{EventRegistrationToken, TypedEventHandler},
+    Foundation::{EventRegistrationToken, TypedEventHandler, IReference, Collections::{IIterable, IVectorView}},
     Storage::Streams::{DataReader, DataWriter},
 };
 
@@ -20,6 +20,27 @@ pub struct MidiInputPort {
 pub struct MidiInput {
     selector: HSTRING,
     ignore_flags: Ignore,
+}
+
+fn port_container_name(device_info : &DeviceInformation) -> Result<HSTRING, PortInfoError> {
+    let container_guid = || ->  windows::core::Result<windows::core::GUID> {
+        let prop = device_info.Properties()?;
+        let ref_key = prop.Lookup(h!("System.Devices.ContainerId"))?;
+        ref_key.cast::<IReference<GUID>>()?.Value()
+    }().map_err(|_| PortInfoError::CannotRetrievePortName)?;
+
+    let guid = format!("{:?}", container_guid);
+
+    let container_name = || ->  windows::core::Result<windows::core::HSTRING> {
+        let props = IVectorView::<HSTRING>::try_from(vec![])?;
+        let device = DeviceInformation::CreateFromIdAsyncWithKindAndAdditionalProperties(
+            &HSTRING::from(guid), &props, DeviceInformationKind::DeviceContainer)?;
+        let result = device.get()?;
+        let device_name = result.Name();
+        device_name
+    }().map_err(|_| PortInfoError::CannotRetrievePortName);
+
+    container_name
 }
 
 impl MidiInput {
@@ -34,6 +55,7 @@ impl MidiInput {
     pub fn ignore(&mut self, flags: Ignore) {
         self.ignore_flags = flags;
     }
+
 
     pub(crate) fn ports_internal(&self) -> Vec<crate::common::MidiInputPort> {
         let device_collection = DeviceInformation::FindAllAsyncAqsFilter(&self.selector)
@@ -68,7 +90,12 @@ impl MidiInput {
         let device_name = device_info
             .Name()
             .map_err(|_| PortInfoError::CannotRetrievePortName)?;
-        Ok(device_name.to_string())
+
+        if let Ok(container_name) = port_container_name(&device_info) {
+            Ok(container_name.to_string())
+        } else {
+            Ok(device_name.to_string())
+        }
     }
 
     fn handle_input<T>(args: &MidiMessageReceivedEventArgs, handler_data: &mut HandlerData<T>) {
@@ -234,7 +261,12 @@ impl MidiOutput {
         let device_name = device_info
             .Name()
             .map_err(|_| PortInfoError::CannotRetrievePortName)?;
-        Ok(device_name.to_string())
+
+        if let Ok(container_name) = port_container_name(&device_info) {
+            Ok(container_name.to_string())
+        } else {
+            Ok(device_name.to_string())
+        }
     }
 
     pub fn connect(
